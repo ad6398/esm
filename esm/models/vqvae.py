@@ -320,7 +320,7 @@ class StructureTokenEncoder(nn.Module):
         z = z.masked_fill(~affine_mask.unsqueeze(2), 0)
         z = self.pre_vq_proj(z)
 
-        z_q, min_encoding_indices, _ = self.codebook(z)
+        z_q, min_encoding_indices, _ = self.codebook(z) #embeddings_st, encoding_indices, commitment_loss
 
         return z_q, min_encoding_indices
 
