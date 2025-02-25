@@ -254,8 +254,9 @@ class StructureTokenVQVAE(nn.Module):
         # print(f"dist_loss: {dist_loss}, dir_loss: {dir_loss}")
 
         loss = dist_loss + dir_loss
+        # print("loss",loss)
 
-        return {"loss": loss, "output": outputs}
+        return {"loss": loss, "predicted_coords": x_pred, "attention_mask": attention_mask }
 
 structure_encoder = StructureTokenEncoder(d_model=256, n_heads=1, v_heads=128, n_layers=2, d_out=128, n_codes=4096)
 structure_decoder = StructureTokenDecoder(d_model=512, n_heads=8, n_layers=8)
@@ -339,9 +340,9 @@ class SingleChainProteinDataset(Dataset):
             # count += 1
 
         # Check for zero vectors (all components = 0)
-        zero_mask = (backbone_atoms == 0).all(dim=-1)  # shape: (seq_len, 3)
-        if zero_mask.any():
-            raise ValueError(f"Zero coordinates found in backbone atoms for PDB {pdb_id}")
+        # zero_mask = (backbone_atoms == 0).all(dim=-1)  # shape: (seq_len, 3)
+        # if zero_mask.any():
+        #     raise ValueError(f"Zero coordinates found in backbone atoms for PDB {pdb_id}")
 
         return {"coords": coords}
 
@@ -401,29 +402,53 @@ for f in pdb_list_files:
 train_pdb_ids, valid_pdb_ids, test_pdb_ids = split_into_train_valid_test(all_pdb_ids)
 
 train_dataset = SingleChainProteinDataset(pdb_ids=train_pdb_ids)
-valid_dataset = SingleChainProteinDataset(pdb_ids=valid_pdb_ids)
+valid_dataset = SingleChainProteinDataset(pdb_ids=valid_pdb_ids[:10])
 test_dataset = SingleChainProteinDataset(pdb_ids=test_pdb_ids)
 
-train_dataset.__len__()
+# train_dataset.__len__()
 
 """## trainer"""
 
-from transformers import Trainer, TrainingArguments
+from transformers import Trainer, TrainingArguments, EvalPrediction
+from esm.utils.structure.protein_structure import compute_rmsd_no_alignment
+
+def compute_rmsd(eval_pred:EvalPrediction):
+#   print("inpyut compute")
+#   print(eval_pred.__dict__.keys())
+#   print(eval_pred.predictions[0].shape, eval_pred.predictions[1].shape)
+#   print(eval_pred.label_ids.shape)
+  B,L = eval_pred.predictions[1].shape
+  coords = torch.from_numpy(eval_pred.label_ids)[:,1:,:3,:].reshape(B,-1,3)
+#   print(coords.shape)
+  attn_mask = torch.from_numpy(eval_pred.predictions[1])[:,1:]
+  pred_coords= torch.from_numpy(eval_pred.predictions[0])[:,1:,:,:].reshape(B,-1,3)
+  num_atom = attn_mask.sum(dim = 1) - 1
+  rmsd = compute_rmsd_no_alignment(aligned=pred_coords, target = coords, num_valid_atoms=num_atom)
+#   print(rmsd)
+  return {"rmsd ": rmsd.item()}
+#   return {"rmsd-batch": 0.66}
 
 # Define Training Arguments
 training_args = TrainingArguments(
     output_dir="./results",
     num_train_epochs=1,
     per_device_train_batch_size=4,
-    eval_steps= 50,
-    # eval_strategy= 'steps',
-    # save_strategy="steps",
+    do_eval = True,
+    eval_steps= 100,
+    eval_strategy= 'steps',
+    save_strategy="steps",
     logging_dir="./logs",
-    logging_steps=10,
-    report_to='none'
+    logging_steps=25,
+    report_to=['none'],
+    # prediction_loss_only=True,
+    label_names=["coords"],
+    # include_for_metrics = ["inputs"]
+    # batch_eval_metrics = True
 )
 
 model = model.to("cuda")
+
+model.main_input_name = "coords"
 
 data_collator = ProteinDataCollator()
 trainer = Trainer(
@@ -432,7 +457,11 @@ trainer = Trainer(
     train_dataset=train_dataset,
     eval_dataset=valid_dataset,
     tokenizer=None, # No traditional tokenizer; we process structures directly
-    data_collator= data_collator
+    data_collator= data_collator,
+    compute_metrics = compute_rmsd,
 )
+trainer.evaluate(eval_dataset=valid_dataset)
+
+
 
 trainer.train()
